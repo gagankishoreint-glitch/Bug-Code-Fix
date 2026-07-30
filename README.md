@@ -1,4 +1,4 @@
-# 🤖 Bug-Code-Fix (Code Review Agent)
+# Bug-Code-Fix (Code Review Agent)
 
 A lightweight local AI agent built with **LangGraph**, **LangChain**, **Ollama**, and **SQLite**. It reads Python scripts, spots logic and syntax bugs, rewrites the code, and logs every fix to a local database.
 
@@ -17,7 +17,7 @@ Right now, smaller local LLMs (like `llama3.2`) occasionally get lazy during too
 
 ---
 
-## 🛠️ How It Works
+##  How It Works
 
 The agent currently relies on 3 custom tools:
 1. `read_file`: Reads target Python files in your workspace.
@@ -26,7 +26,7 @@ The agent currently relies on 3 custom tools:
 
 ---
 
-## 🚀 How to Run
+##  How to Run
 
 1. **Activate your environment: **
    ```bash
@@ -39,6 +39,11 @@ The agent currently relies on 3 custom tools:
      python main.py
 
 **Techstack:**
+```
 LLM: Ollama (llama3.2)
+```
+```
 Agent Framework: LangChain & LangGraph
+```
+```
 Database: SQLite
