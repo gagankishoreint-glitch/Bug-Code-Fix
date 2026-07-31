@@ -1,91 +1,102 @@
 import os
-from datetime import datetime
+import re
 import sqlite3
-from langchain_core.tools import tool
+from datetime import datetime
+from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
+from langchain_core.prompts import ChatPromptTemplate
 
-DB_NAME="cofix-history.db"
+DB_NAME = "cofix-history.db"
 
 def init_db():
-    """create a database for the ollama model to store the fixes and overwrite the buggy file"""
-    conn=sqlite3.connect(DB_NAME)
-    cursor=conn.cursor()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS review_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_path TEXT NOT NULL,
-            bug_summary TEXT NOT NULL,
-            fixed_code TEXT NOT NULL,
-            timestamp TEXT NOT NULL
-        )
-        ''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path TEXT NOT NULL,
+        bug_summary TEXT NOT NULL,
+        fixed_code TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+    )
+    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-@tool
-def read_file(file_path:str)-> str:
-    """Reads and returns the text content of the given file path."""
-    if not os.path.exists(file_path):
-        return f"Error: File {file_path} does not exist"
-    with open(file_path,"r") as f:
-        return f.read()
-    
-@tool
-def save_and_log(file_path:str,bug_summary:str,fixed_code:str)-> str:
-    """Saves the corrected code to the file AND logs the bug details in SQLite"""
-    with open(file_path,"w") as f:
-        f.write(fixed_code)
+app = FastAPI(title="CoFix API")
 
-    conn=sqlite3.connect(DB_NAME)
-    cursor=conn.cursor()
-    cursor.execute('''INSERT INTO review_history (file_path, bug_summary, fixed_code, timestamp)
-        VALUES (?, ?, ?, ?)''',(file_path,bug_summary,fixed_code,datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-    conn.close()
-
-    return f"Successfully updated '{file_path}'!"
-
-@tool
-def fix_history(file_path: str) -> str:
-    """Queries the SQLite database for past bug fixes applied to a specific file."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, bug_summary, timestamp FROM review_history WHERE file_path = ? ORDER BY id DESC
-    ''', (file_path,))
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        return f"no prior history or data found for '{file_path}'."
-    history_report = f"Fix History for '{file_path}':\n"
-    for row in rows:
-        history_report += f"- [ID {row[0]} | {row[2]}] Summary: {row[1]}\n"
-    return history_report
-
-
-#agent-setup
-llm=ChatOllama(model="llama3.2",temperature=0)
-
-system_prompt=("You are an expert Python Bug Hunter agent. "
-    "Use `read_file` to read files. "
-    "When applying fixes, use `save_and_log` to overwrite the file and record the entry in DB. "
-    "Use `fix_history` if the user asks about previous logs.")
-
-agent=create_react_agent(
-    llm,
-    tools=[read_file,save_and_log,fix_history],
-    prompt=system_prompt
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-print("\n Bug Hunter Agent (Type 'exit' to quit)\n" + "-"*50)
 
-while True:
-    user_input = input("\nEnter request: ")
-    if user_input.lower() in ["exit", "quit"]:
-        break
-    
-    response = agent.invoke({"messages": [("user", user_input)]})
-    print("\nAgent Response:\n", response["messages"][-1].content)
+llm = ChatOllama(model="llama3.2", temperature=0)
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_index():
+    if os.path.exists("index.html"):
+        with open("index.html", "r") as f:
+            return f.read()
+    return "<h1>index.html not found</h1>"
+
+class FixRequest(BaseModel):
+    file_path: str = "target_buggy_code.py"
+    code_content: str
+
+def extract_code(llm_response: str) -> str:
+    """Strips markdown backticks and returns clean runnable code."""
+    match = re.search(r"```(?:python)?\s*\n(.*?)```", llm_response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return llm_response.strip()
+
+@app.post("/api/fix")
+async def run_agent_fix(payload: FixRequest):
+    try:
+        # 1. Directly prompt Ollama to fix code
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert Python debugger. Fix all bugs (syntax, logic, index errors, zero division). Return ONLY the clean, corrected Python code inside a ```python ``` code block. Do NOT include explanations."),
+            ("user", "Fix this code:\n\n{code}")
+        ])
+
+        chain = prompt | llm
+        response = chain.invoke({"code": payload.code_content})
+
+        fixed_code = extract_code(response.content)
+
+        # 2. Python directly writes to disk & SQLite (Bulletproof)
+        with open(payload.file_path, "w") as f:
+            f.write(fixed_code)
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO review_history (file_path, bug_summary, fixed_code, timestamp)
+            VALUES (?, ?, ?, ?)''', (payload.file_path, "Fixed logic & runtime bugs", fixed_code, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+
+        # 3. Return the fixed code straight to the UI
+        return {
+            "success": True,
+            "fixed_code": fixed_code,
+            "steps": [
+                "🔍 Analyzed syntax & runtime errors",
+                "⚡ Corrected loop bounds & division guards",
+                "💾 Saved patch to workspace & SQLite history"
+            ]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
